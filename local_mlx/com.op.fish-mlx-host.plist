@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.op.fish-mlx-host</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/op/fish-speech-int4-patch/.venv-mlx/bin/python</string>
+    <string>/Users/op/fish-speech-int4-patch/local_mlx/host_server.py</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8881</string>
+    <string>--model-path</string>
+    <string>/Users/op/fish-speech-int4-patch/checkpoints/fish-audio-s2-pro-8bit-mlx-normalized</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/op/fish-speech-int4-patch</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/fish-mlx-host.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/fish-mlx-host.err</string>
+</dict>
+</plist>
