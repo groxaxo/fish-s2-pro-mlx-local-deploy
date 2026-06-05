@@ -73,17 +73,17 @@ class FishMLXServer:
         return self.model
 
     def _run_warmup(self) -> None:
+        """Run warmup synthesis. Caller must hold ``self.lock``."""
         print("Running Fish MLX warmup synthesis...", flush=True)
         started = time.perf_counter()
-        with self.lock:
-            for _ in self.model.generate(
-                text=DEFAULT_WARMUP_TEXT,
-                max_tokens=8,
-                temperature=0.0,
-                verbose=False,
-                stream=False,
-            ):
-                pass
+        for _ in self.model.generate(
+            text=DEFAULT_WARMUP_TEXT,
+            max_tokens=8,
+            temperature=0.0,
+            verbose=False,
+            stream=False,
+        ):
+            pass
         mx.eval(mx.array(0))
         elapsed = time.perf_counter() - started
         print(f"Warmup complete in {elapsed:.3f}s", flush=True)
