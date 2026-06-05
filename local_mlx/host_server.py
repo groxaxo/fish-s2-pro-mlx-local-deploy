@@ -8,8 +8,10 @@ server runs on macOS and is fronted by the Docker proxy in this directory.
 from __future__ import annotations
 
 import argparse
+import sys
 import io
 import json
+import os
 import threading
 import time
 from http import HTTPStatus
@@ -17,10 +19,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 import mlx.core as mx
 import numpy as np
 import soundfile as sf
 from mlx_audio.tts.utils import load_model
+
+from local_mlx.patches.fish_speech_fastpath import apply_fish_speech_patch
 
 
 MODEL_ID = "fish-audio-s2-pro-8bit-mlx"
@@ -39,25 +47,56 @@ OPENAI_VOICES = {
     "default",
     "",
 }
+DEFAULT_MAX_TOKENS = int(os.environ.get("FISH_MLX_MAX_TOKENS", "256"))
+DEFAULT_WARMUP_TEXT = os.environ.get("FISH_MLX_WARMUP_TEXT", "Hi.")
 
 
 class FishMLXServer:
-    def __init__(self, model_path: Path, lazy: bool):
+    def __init__(self, model_path: Path, lazy: bool, warmup: bool):
         self.model_path = model_path
         self.lazy = lazy
+        self.warmup = warmup
         self.model = None
         self.lock = threading.Lock()
         self.loaded_at: float | None = None
+        self.last_timing: dict[str, float | int] = {}
 
     def ensure_model(self):
         if self.model is None:
             with self.lock:
                 if self.model is None:
+                    apply_fish_speech_patch()
                     self.model = load_model(self.model_path, lazy=self.lazy, strict=True)
                     self.loaded_at = time.time()
+                    if self.warmup:
+                        self._run_warmup()
         return self.model
 
-    def synthesize(self, payload: dict[str, Any]) -> tuple[bytes, str]:
+    def _run_warmup(self) -> None:
+        print("Running Fish MLX warmup synthesis...", flush=True)
+        started = time.perf_counter()
+        with self.lock:
+            for _ in self.model.generate(
+                text=DEFAULT_WARMUP_TEXT,
+                max_tokens=8,
+                temperature=0.0,
+                verbose=False,
+                stream=False,
+            ):
+                pass
+        mx.eval(mx.array(0))
+        elapsed = time.perf_counter() - started
+        print(f"Warmup complete in {elapsed:.3f}s", flush=True)
+
+    def _effective_max_tokens(self, model: Any, text: str, requested: int) -> int:
+        requested = max(1, min(requested, DEFAULT_MAX_TOKENS))
+        if model.tokenizer is None:
+            return requested
+        text_tokens = len(model.tokenizer.encode(text))
+        budget = min(requested, max(32, text_tokens * 12))
+        return budget
+
+    def synthesize(self, payload: dict[str, Any]) -> tuple[bytes, str, dict[str, float | int]]:
         text = str(payload.get("input") or payload.get("text") or "").strip()
         if not text:
             raise ValueError("Missing required `input` text.")
@@ -74,14 +113,22 @@ class FishMLXServer:
         if response_format not in {"wav", "flac", "ogg"}:
             raise ValueError("Supported response_format values: wav, flac, ogg.")
 
+        greedy = bool(payload.get("greedy", False))
+        temperature = float(payload.get("temperature") or 0.7)
+        if greedy:
+            temperature = 0.0
+
         model = self.ensure_model()
+        requested_max_tokens = int(payload.get("max_tokens") or DEFAULT_MAX_TOKENS)
+        effective_max_tokens = self._effective_max_tokens(model, text, requested_max_tokens)
+
         gen_kwargs = {
             "text": text,
             "voice": "default",
             "speed": float(payload.get("speed") or 1.0),
             "lang_code": str(payload.get("lang_code") or payload.get("language") or "en"),
-            "temperature": float(payload.get("temperature") or 0.7),
-            "max_tokens": int(payload.get("max_tokens") or 1200),
+            "temperature": temperature,
+            "max_tokens": effective_max_tokens,
             "verbose": bool(payload.get("verbose", False)),
             "stream": False,
         }
@@ -92,16 +139,32 @@ class FishMLXServer:
 
         chunks = []
         sample_rate = getattr(model, "sample_rate", 24000)
+        semantic_tokens = 0
+        started = time.perf_counter()
         with self.lock:
             for result in model.generate(**gen_kwargs):
                 chunks.append(result.audio)
                 sample_rate = result.sample_rate
+                semantic_tokens += int(getattr(result, "token_count", 0) or 0)
 
         if not chunks:
             raise RuntimeError("Model returned no audio.")
 
         audio = chunks[0] if len(chunks) == 1 else mx.concatenate(chunks, axis=0)
         audio_np = np.asarray(audio, dtype=np.float32)
+        gen_seconds = max(time.perf_counter() - started, 1e-6)
+        audio_seconds = float(audio_np.shape[0]) / float(sample_rate)
+        rtf = gen_seconds / max(audio_seconds, 1e-6)
+
+        self.last_timing = {
+            "gen_seconds": gen_seconds,
+            "audio_seconds": audio_seconds,
+            "rtf": rtf,
+            "semantic_tokens": semantic_tokens,
+            "max_tokens_requested": requested_max_tokens,
+            "max_tokens_effective": effective_max_tokens,
+        }
+
         out = io.BytesIO()
         sf.write(out, audio_np, sample_rate, format=response_format.upper())
         media_type = {
@@ -109,7 +172,7 @@ class FishMLXServer:
             "flac": "audio/flac",
             "ogg": "audio/ogg",
         }[response_format]
-        return out.getvalue(), media_type
+        return out.getvalue(), media_type, self.last_timing
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -123,10 +186,24 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
-    def _bytes(self, status: int, body: bytes, media_type: str) -> None:
+    def _bytes(
+        self,
+        status: int,
+        body: bytes,
+        media_type: str,
+        timing: dict[str, float | int] | None = None,
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", media_type)
         self.send_header("Content-Length", str(len(body)))
+        if timing:
+            self.send_header("X-Gen-Seconds", f"{timing['gen_seconds']:.6f}")
+            self.send_header("X-Audio-Seconds", f"{timing['audio_seconds']:.6f}")
+            self.send_header("X-RTF", f"{timing['rtf']:.6f}")
+            self.send_header("X-Semantic-Tokens", str(timing["semantic_tokens"]))
+            self.send_header(
+                "X-Max-Tokens-Effective", str(timing["max_tokens_effective"])
+            )
         self.end_headers()
         self.wfile.write(body)
 
@@ -138,8 +215,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            model_loaded = self.server.fish.model is not None  # type: ignore[attr-defined]
-            self._json(HTTPStatus.OK, {"ok": True, "backend": "mlx-host", "model_loaded": model_loaded})
+            fish = self.server.fish  # type: ignore[attr-defined]
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "backend": "mlx-host",
+                    "model_loaded": fish.model is not None,
+                    "hq_offline_only": True,
+                    "default_max_tokens": DEFAULT_MAX_TOKENS,
+                    "patch_applied": True,
+                },
+            )
             return
         if self.path == "/v1/models":
             self._json(
@@ -147,7 +234,17 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "object": "list",
                     "data": [
-                        {"id": model_id, "object": "model", "created": 1710000000, "owned_by": "local"}
+                        {
+                            "id": model_id,
+                            "object": "model",
+                            "created": 1710000000,
+                            "owned_by": "local",
+                            "use_case": (
+                                "hq_offline"
+                                if model_id in {MODEL_ID, "s2-pro-mlx"}
+                                else "compat"
+                            ),
+                        }
                         for model_id in OPENAI_MODELS
                     ],
                 },
@@ -160,8 +257,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.NOT_FOUND, {"error": {"message": "Not found"}})
             return
         try:
-            audio, media_type = self.server.fish.synthesize(self._read_json())  # type: ignore[attr-defined]
-            self._bytes(HTTPStatus.OK, audio, media_type)
+            audio, media_type, timing = self.server.fish.synthesize(self._read_json())  # type: ignore[attr-defined]
+            self._bytes(HTTPStatus.OK, audio, media_type, timing)
         except Exception as exc:
             self._json(
                 HTTPStatus.BAD_REQUEST,
@@ -178,10 +275,21 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8881)
     parser.add_argument(
         "--model-path",
-        default="checkpoints/fish-audio-s2-pro-8bit-mlx",
+        default="checkpoints/fish-audio-s2-pro-8bit-mlx-normalized",
         help="Local path to the downloaded MLX model snapshot.",
     )
-    parser.add_argument("--lazy", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--lazy",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Lazy-load weights (default: eager for low first-request latency).",
+    )
+    parser.add_argument(
+        "--warmup",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run a short synthesis after model load to prime MLX caches.",
+    )
     args = parser.parse_args()
 
     model_path = Path(args.model_path).expanduser().resolve()
@@ -189,9 +297,20 @@ def main() -> None:
         raise SystemExit(f"Model path does not exist: {model_path}")
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
-    httpd.fish = FishMLXServer(model_path=model_path, lazy=args.lazy)  # type: ignore[attr-defined]
+    httpd.fish = FishMLXServer(  # type: ignore[attr-defined]
+        model_path=model_path,
+        lazy=args.lazy,
+        warmup=args.warmup,
+    )
+    if not args.lazy:
+        httpd.fish.ensure_model()  # type: ignore[attr-defined]
+
     print(f"Fish MLX host server listening on http://{args.host}:{args.port}", flush=True)
     print(f"Model path: {model_path}", flush=True)
+    print(
+        "Fish S2 MLX is HQ/offline only; use VibeVoice/Chatterbox for live conversation.",
+        flush=True,
+    )
     httpd.serve_forever()
 
 

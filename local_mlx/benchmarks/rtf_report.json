@@ -1,0 +1,68 @@
+{
+  "model_path": "/Users/op/fish-speech-int4-patch/checkpoints/fish-audio-s2-pro-8bit-mlx-normalized",
+  "load_seconds": 1.56,
+  "greedy": false,
+  "cases": [
+    {
+      "name": "hello_8_tokens",
+      "text": "Hello.",
+      "max_tokens": 8,
+      "greedy": false,
+      "gen_seconds": 0.7913,
+      "audio_seconds": 0.3715,
+      "semantic_tokens": 8,
+      "rtf": 2.13,
+      "baseline_rtf": 3.99,
+      "rtf_threshold": 3.0,
+      "passed": true,
+      "patch_profile": {
+        "total_ms": 729.3307079999067,
+        "slow_ms": 11.11674799813045,
+        "fast_ms": 342.8605000008247,
+        "sample_ms": 0.33200000052602263,
+        "semantic_steps": 8.0
+      }
+    },
+    {
+      "name": "short_sentence",
+      "text": "The quick brown fox jumps over the lazy dog.",
+      "max_tokens": 256,
+      "greedy": false,
+      "gen_seconds": 5.9439,
+      "audio_seconds": 2.9722,
+      "semantic_tokens": 64,
+      "rtf": 1.9998,
+      "baseline_rtf": 2.07,
+      "rtf_threshold": 1.6,
+      "passed": false,
+      "patch_profile": {
+        "total_ms": 5348.727957999472,
+        "slow_ms": 77.70137399984378,
+        "fast_ms": 2649.624912998661,
+        "sample_ms": 2.0187910022286815,
+        "semantic_steps": 64.0
+      }
+    },
+    {
+      "name": "played_sample",
+      "text": "This is a slightly longer sample used to validate Fish S2 MLX latency after the fastpath patch.",
+      "max_tokens": 256,
+      "greedy": false,
+      "gen_seconds": 15.0364,
+      "audio_seconds": 7.0589,
+      "semantic_tokens": 152,
+      "rtf": 2.1301,
+      "baseline_rtf": 2.08,
+      "rtf_threshold": 1.5,
+      "passed": false,
+      "patch_profile": {
+        "total_ms": 12777.289500000734,
+        "slow_ms": 213.72037900619034,
+        "fast_ms": 6351.74642399852,
+        "sample_ms": 6.075296996641555,
+        "semantic_steps": 152.0
+      }
+    }
+  ],
+  "all_passed": false
+}

@@ -8,16 +8,25 @@
   <key>ProgramArguments</key>
   <array>
     <string>/Users/op/fish-speech-int4-patch/.venv-mlx/bin/python</string>
-    <string>/Users/op/fish-speech-int4-patch/local_mlx/host_server.py</string>
+    <string>/Users/op/fish-s2-pro-mlx-local-deploy/local_mlx/host_server.py</string>
     <string>--host</string>
     <string>127.0.0.1</string>
     <string>--port</string>
     <string>8881</string>
     <string>--model-path</string>
     <string>/Users/op/fish-speech-int4-patch/checkpoints/fish-audio-s2-pro-8bit-mlx-normalized</string>
+    <string>--no-lazy</string>
+    <string>--warmup</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FISH_MLX_MAX_TOKENS</key>
+    <string>256</string>
+    <key>PYTHONPATH</key>
+    <string>/Users/op/fish-s2-pro-mlx-local-deploy</string>
+  </dict>
   <key>WorkingDirectory</key>
-  <string>/Users/op/fish-speech-int4-patch</string>
+  <string>/Users/op/fish-s2-pro-mlx-local-deploy</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

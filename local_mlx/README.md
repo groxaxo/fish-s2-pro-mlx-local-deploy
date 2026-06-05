@@ -1,29 +1,66 @@
 # Local MLX Fish S2 Pro Deployment
 
-This deployment uses the requested `cs2764/fish-audio-s2-pro-8bit-mlx` model
-snapshot, normalized into `checkpoints/fish-audio-s2-pro-8bit-mlx-normalized`.
+HQ/offline Fish S2 MLX — **not** for live conversation. Use VibeVoice or Chatterbox
+(`tts-multimodel-api`, default `vibe-realtime-8bit`) for talk mode and low latency.
+
+This deployment uses `cs2764/fish-audio-s2-pro-8bit-mlx`, normalized into
+`checkpoints/fish-audio-s2-pro-8bit-mlx-normalized`.
 
 Docker Desktop on Apple Silicon runs Linux containers and cannot access Apple
-Metal/MLX directly. The working local shape is therefore:
+Metal/MLX directly:
 
-- macOS host process: loads the MLX model on `127.0.0.1:8881`
-- Docker container: exposes the local OpenAI-compatible API on `127.0.0.1:8880`
-  and proxies to `host.docker.internal:8881`
+- macOS host: MLX model on `127.0.0.1:8881` (eager load + warmup + fastpath patch)
+- Docker proxy: OpenAI-compatible API on `127.0.0.1:8880` → `host.docker.internal:8881`
 
-Start both:
+## Paths (this machine)
+
+| Item | Path |
+|---|---|
+| Python venv | `/Users/op/fish-speech-int4-patch/.venv-mlx/bin/python` |
+| Model | `/Users/op/fish-speech-int4-patch/checkpoints/fish-audio-s2-pro-8bit-mlx-normalized` |
+| Deploy repo | `/Users/op/fish-s2-pro-mlx-local-deploy` |
+
+The LaunchAgent plist and benchmark commands below use these paths.
+
+## Setup
 
 ```bash
-cd /Users/op/fish-speech-int4-patch
-.venv-mlx/bin/python local_mlx/normalize_cs2764_checkpoint.py \
-  checkpoints/fish-audio-s2-pro-8bit-mlx \
-  checkpoints/fish-audio-s2-pro-8bit-mlx-normalized
+cd /Users/op/fish-s2-pro-mlx-local-deploy
+/Users/op/fish-speech-int4-patch/.venv-mlx/bin/python local_mlx/normalize_cs2764_checkpoint.py \
+  /Users/op/fish-speech-int4-patch/checkpoints/fish-audio-s2-pro-8bit-mlx \
+  /Users/op/fish-speech-int4-patch/checkpoints/fish-audio-s2-pro-8bit-mlx-normalized
 ./start_mlx_local.sh
 ```
 
-Detached start:
+The generation fastpath patch is applied automatically at host startup via
+`local_mlx/patches/fish_speech_fastpath.py` (runtime monkey-patch, no site-packages edit).
+To verify manually:
 
 ```bash
-cd /Users/op/fish-speech-int4-patch
+PYTHONPATH=/Users/op/fish-s2-pro-mlx-local-deploy \
+  /Users/op/fish-speech-int4-patch/.venv-mlx/bin/python local_mlx/patches/apply_patch.sh
+```
+
+## Routing (which backend when)
+
+| Use case | Backend | Endpoint |
+|---|---|---|
+| Talk / live / low latency | VibeVoice (`vibe-realtime-8bit`) | `tts-multimodel-api` :8000 |
+| Chatterbox multilingual | `chatterbox-*` | `tts-multimodel-api` :8000 |
+| Clone / narration / HQ offline | Fish S2 MLX | host `:8881` or Docker proxy `:8880` |
+| OpenAI-compatible speech API | Fish S2 via proxy | `POST /v1/audio/speech` on `:8880` |
+
+In `tts-multimodel-api`:
+
+- Default model: `vibe-realtime-8bit` (live conversation)
+- HQ alias: `fish-s2-pro-quality` (same weights as `fish-s2-pro-4bit`, capped at 256 tokens)
+- `GET /models` and `GET /health` document `use_case` and `fish_s2_max_tokens`
+
+Fish S2 MLX does **not** support streaming (`stream=True` raises in mlx-audio).
+
+## Detached LaunchAgent
+
+```bash
 cp local_mlx/com.op.fish-mlx-host.plist ~/Library/LaunchAgents/com.op.fish-mlx-host.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.op.fish-mlx-host.plist
 launchctl enable gui/$(id -u)/com.op.fish-mlx-host
@@ -31,30 +68,66 @@ launchctl kickstart -k gui/$(id -u)/com.op.fish-mlx-host
 docker compose -f compose.mlx.yml up -d --build
 ```
 
-Stop detached services:
+Host defaults: `--no-lazy`, `--warmup`, `FISH_MLX_MAX_TOKENS=256`, `PYTHONPATH` set to deploy repo.
+
+Optional request flags on `:8881`:
+
+- `greedy: true` — sets `temperature=0` and uses compiled argmax on the fast residual path
+- Response headers: `X-Gen-Seconds`, `X-Audio-Seconds`, `X-RTF`, `X-Semantic-Tokens`, `X-Max-Tokens-Effective`
+
+## Smoke checks
 
 ```bash
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.op.fish-mlx-host.plist
-docker compose -f compose.mlx.yml down
-```
-
-Smoke checks:
-
-```bash
-curl http://127.0.0.1:8880/health
-curl http://127.0.0.1:8880/v1/models
-curl -X POST http://127.0.0.1:8880/v1/audio/speech \
+curl http://127.0.0.1:8881/health
+curl -i -X POST http://127.0.0.1:8881/v1/audio/speech \
   -H 'Content-Type: application/json' \
-  -d '{"model":"fish-audio-s2-pro-8bit-mlx","input":"Hello.","response_format":"wav","lang_code":"en","max_tokens":8}' \
+  -d '{"model":"fish-audio-s2-pro-8bit-mlx","input":"Hello.","max_tokens":8}' \
   --output /tmp/fish-s2-pro-mlx.wav
 ```
 
-Root cause fixed here: the cs2764 safetensors use already-sanitized weight keys,
-but `lucasnewman/mlx-audio@fish-audio-s2` expects upstream keys and sanitizes
-them at load time. Loading the raw cs2764 snapshot with `strict=False` silently
-dropped model weights and made synthesis hang. The normalizer rewrites the keys
-to `text_model.model.*` and `audio_decoder.*`, after which the server loads with
-`strict=True`.
+Via Docker proxy:
 
-Verified on this Mac: health/model-list work through Docker, and an 8-token
-`/v1/audio/speech` request returned a valid 44.1 kHz WAV in 4 seconds.
+```bash
+curl http://127.0.0.1:8880/health
+```
+
+## RTF benchmark
+
+```bash
+PYTHONPATH=/Users/op/fish-s2-pro-mlx-local-deploy \
+  /Users/op/fish-speech-int4-patch/.venv-mlx/bin/python local_mlx/profile_generation.py \
+  --model-path /Users/op/fish-speech-int4-patch/checkpoints/fish-audio-s2-pro-8bit-mlx-normalized
+```
+
+Greedy mode (compiled fast-path argmax):
+
+```bash
+PYTHONPATH=/Users/op/fish-s2-pro-mlx-local-deploy \
+  /Users/op/fish-speech-int4-patch/.venv-mlx/bin/python local_mlx/profile_generation.py \
+  --model-path /Users/op/fish-speech-int4-patch/checkpoints/fish-audio-s2-pro-8bit-mlx-normalized \
+  --greedy \
+  --output local_mlx/benchmarks/rtf_report_greedy.json
+```
+
+Reports: `local_mlx/benchmarks/rtf_report.json` (stochastic) and `rtf_report_greedy.json`.
+
+### Acceptance gates
+
+| Case | RTF threshold | Baseline (pre-patch) |
+|---|---:|---:|
+| `Hello.` (~8 tokens) | &lt; 3.0 | 3.99 |
+| Short sentence (~64 tokens) | &lt; 1.6 | 2.07 |
+| Longer sample (~150 tokens) | &lt; 1.5 | 2.08 |
+
+The script exits non-zero if any gate fails. After the fastpath patch, the hello case
+typically passes; longer clips may still exceed gates (~2.0 RTF) — see below.
+
+## If RTF is still too high
+
+See [UPSTREAM_OPTIONS.md](UPSTREAM_OPTIONS.md) for upstream PR, Swift prototype, or CUDA server paths.
+
+## Checkpoint normalization
+
+The cs2764 safetensors use already-sanitized keys; `mlx-audio@fish-audio-s2` expects
+upstream keys. The normalizer rewrites to `text_model.model.*` and `audio_decoder.*`
+so `strict=True` load works.
