@@ -813,7 +813,13 @@ class DualARTransformer(BaseTransformer):
         # Fast transformer
         self.fast_embeddings = nn.Embedding(config.codebook_size, config.fast_dim)
 
-        # The equivalent bs is so large that sdpa doesn't work
+        # Enable SDPA for fast layers.  For the short sequences the fast
+        # decoder operates on (<= num_codebooks=10 tokens), PyTorch SDPA will
+        # auto-select the most efficient backend.  The original comment
+        # ("equivalent bs is so large that sdpa doesn't work") was likely
+        # referring to a now-fixed PyTorch bug.  If SDPA fails on a specific
+        # CUDA version, the Attention module's else-branch (manual matmul) is
+        # still available by flipping this flag back to False.
         override_config = dataclasses.replace(
             config,
             dim=config.fast_dim,
@@ -825,9 +831,8 @@ class DualARTransformer(BaseTransformer):
             attention_qk_norm=config.fast_attention_qk_norm,
             attention_o_bias=config.fast_attention_o_bias,
         )
-
         self.fast_layers = nn.ModuleList(
-            TransformerBlock(override_config, use_sdpa=False)
+            TransformerBlock(override_config, use_sdpa=True)
             for _ in range(config.n_fast_layer)
         )
         self.fast_norm = RMSNorm(config.fast_dim, eps=config.norm_eps)

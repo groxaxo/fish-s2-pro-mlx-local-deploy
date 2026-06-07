@@ -1,4 +1,16 @@
-"""Runtime patches for mlx-audio Fish Speech generation hot path."""
+"""Runtime patches for mlx-audio Fish Speech generation hot path.
+
+Optimizations (backed by MLX Context7 docs):
+1. Reuse fast KV-cache across semantic steps (trim+reuse vs realloc 131x)
+2. Pre-allocated codebook buffer replaces mx.concatenate (fusion barrier removal)
+3. Deferred evaluation: single mx.eval per outer-loop step, not per sub-operation
+4. Compiled greedy sampling via @mx.compile
+5. Minimize .item() forced-sync points (Context7: "scalar access forces eval")
+
+Accurate profiling: When FISH_MLX_PROFILE=1, explicit mx.eval() barriers are
+inserted at each phase boundary so wall-clock timers measure actual GPU/Metal
+execution, not just lazy graph construction.
+"""
 
 from __future__ import annotations
 
@@ -70,42 +82,6 @@ def _sample_semantic_fast(
     return chosen.reshape(normal.shape).astype(normal.dtype)
 
 
-def _generate_fast_residual_codebooks(
-    self: "Model",
-    hidden_state: mx.array,
-    semantic_code: mx.array,
-    temperature: float,
-    top_p: float,
-    top_k: int,
-) -> mx.array:
-    from mlx_audio.tts.models.fish_qwen3_omni.fish_speech import _sample_logits
-
-    fast_cache = self.model.make_fast_cache()
-    self.model.fast_forward_cached(hidden_state, fast_cache)
-    fast_hidden = self.model.fast_embeddings(semantic_code)
-    previous_codebooks = semantic_code[:, None]
-    greedy = temperature <= 0
-
-    for _ in range(self.model.num_codebooks - 1):
-        residual_logits = self.model.fast_forward_cached(fast_hidden, fast_cache)
-        if greedy:
-            residual_token = _fast_sample_greedy(residual_logits)
-        else:
-            residual_token = _sample_logits(
-                residual_logits,
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-            )
-        previous_codebooks = mx.concatenate(
-            [previous_codebooks, residual_token[:, None]], axis=1
-        )
-        fast_hidden = self.model.fast_embeddings(residual_token)
-
-    mx.eval(previous_codebooks)
-    return previous_codebooks[0]
-
-
 def _generate_codes_for_batch_patched(
     self: "Model",
     conversation,
@@ -122,12 +98,13 @@ def _generate_codes_for_batch_patched(
     )
     from mlx_audio.tts.models.fish_qwen3_omni.prompt import TextPart
     from mlx_audio.tts.models.fish_qwen3_omni.tokenizer import IM_END_TOKEN
+    from mlx_audio.tts.models.fish_qwen3_omni.fish_speech import _sample_logits
 
     if self.tokenizer is None:
         raise ValueError("Tokenizer not loaded. Call post_load_hook first.")
 
     t0 = time.perf_counter() if _PROFILE_ENABLED else 0.0
-    slow_ms = fast_ms = sample_ms = 0.0
+    slow_ms = fast_ms = sample_ms = eval_ms = 0.0
 
     prompt_conversation = Conversation(list(conversation.messages))
     prompt_conversation.append(
@@ -154,10 +131,17 @@ def _generate_codes_for_batch_patched(
     im_end_id = self.tokenizer.get_token_id(IM_END_TOKEN)
     text_token_count = len(self.tokenizer.encode(batch_text))
     semantic_token_budget = min(max_new_tokens, max(32, text_token_count * 12))
+    num_cb = self.model.num_codebooks
+    greedy = temperature <= 0
 
-    for _ in range(semantic_token_budget):
+    # Allocate fast cache once; reuse across all semantic steps via trim()
+    fast_cache = self.model.make_fast_cache()
+
+    for step in range(semantic_token_budget):
+        # Phase 1: Sample semantic token (includes pending graph evaluation)
         if _PROFILE_ENABLED:
             ts = time.perf_counter()
+
         ras_window = (
             mx.array(previous_semantic_tokens, dtype=mx.int32)
             if previous_semantic_tokens
@@ -171,10 +155,12 @@ def _generate_codes_for_batch_patched(
             top_k=top_k,
             temperature=temperature,
         )
+        # .item() forces eval of pending lazy graph from previous step
+        semantic_token_id = int(semantic_token[0].item())
+
         if _PROFILE_ENABLED:
             sample_ms += time.perf_counter() - ts
 
-        semantic_token_id = int(semantic_token[0].item())
         if semantic_token_id == im_end_id:
             break
 
@@ -188,20 +174,43 @@ def _generate_codes_for_batch_patched(
             semantic_code, 0, self.config.audio_decoder_config.vocab_size - 1
         )
 
+        # Phase 2: Fast AR -- prefill + 9 residual codebook steps
         if _PROFILE_ENABLED:
             tf = time.perf_counter()
-        codebook_row = _generate_fast_residual_codebooks(
-            self,
-            hidden_state=hidden_state,
-            semantic_code=semantic_code,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-        )
+
+        for c in fast_cache:
+            c.trim(c.offset)
+
+        self.model.fast_forward_cached(hidden_state, fast_cache)
+        fast_hidden = self.model.fast_embeddings(semantic_code)
+
+        codebook_buf = mx.zeros((1, num_cb), dtype=mx.int32)
+        codebook_buf[:, 0] = semantic_code
+
+        for i in range(1, num_cb):
+            residual_logits = self.model.fast_forward_cached(fast_hidden, fast_cache)
+            if greedy:
+                residual_token = _fast_sample_greedy(residual_logits)
+            else:
+                residual_token = _sample_logits(
+                    residual_logits,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                )
+            codebook_buf[:, i] = residual_token
+            fast_hidden = self.model.fast_embeddings(residual_token)
+
+        codebook_row = codebook_buf[0]
+
         if _PROFILE_ENABLED:
+            # Force eval to measure actual fast AR execution time
+            mx.eval(codebook_row)
             fast_ms += time.perf_counter() - tf
+
         generated_steps.append(codebook_row)
 
+        # Phase 3: Build next input + eval + slow model step
         next_input = mx.concatenate(
             [
                 semantic_token[:, None].astype(mx.int32),
@@ -209,13 +218,25 @@ def _generate_codes_for_batch_patched(
             ],
             axis=1,
         )
+
         if _PROFILE_ENABLED:
             ts = time.perf_counter()
+            mx.eval(next_input)
+            eval_ms += time.perf_counter() - ts
+            ts = time.perf_counter()
+
         next_result = self.model(next_input[:, :, None], cache=cache)
         logits = next_result.logits[:, -1]
         hidden_state = next_result.hidden_states[:, -1]
+
         if _PROFILE_ENABLED:
+            # Force eval to measure actual slow model execution time
+            mx.eval(logits, hidden_state)
             slow_ms += time.perf_counter() - ts
+
+        if not _PROFILE_ENABLED:
+            # In production (no profiling), use single eval boundary for throughput
+            mx.eval(next_input)
 
     if not generated_steps:
         raise RuntimeError(
@@ -229,6 +250,7 @@ def _generate_codes_for_batch_patched(
             "slow_ms": slow_ms * 1000.0,
             "fast_ms": fast_ms * 1000.0,
             "sample_ms": sample_ms * 1000.0,
+            "eval_ms": eval_ms * 1000.0,
             "semantic_steps": float(len(generated_steps)),
         }
 
@@ -274,6 +296,10 @@ def _generate_codes_for_text_batch_patched(
     max_budget = max(token_budgets)
     im_end_tokens = mx.full((batch_size,), im_end_id, dtype=mx.int32)
     greedy = temperature <= 0
+    num_cb = self.model.num_codebooks
+
+    # Allocate fast cache once; reuse across all steps via trim()
+    fast_cache = self.model.make_fast_cache()
 
     for step in range(max_budget):
         active = [
@@ -316,13 +342,19 @@ def _generate_codes_for_text_batch_patched(
         semantic_code = mx.where(
             continue_mask, semantic_code, mx.zeros_like(semantic_code)
         )
-        previous_codebooks = semantic_code[:, None]
 
-        fast_cache = self.model.make_fast_cache()
+        # Trim fast cache back to offset 0 for this step
+        for c in fast_cache:
+            c.trim(c.offset)
+
         self.model.fast_forward_cached(hidden_state, fast_cache)
         fast_hidden = self.model.fast_embeddings(semantic_code)
 
-        for _ in range(self.model.num_codebooks - 1):
+        # Pre-allocated codebook buffer instead of incremental concatenate
+        codebook_buf = mx.zeros((batch_size, num_cb), dtype=mx.int32)
+        codebook_buf[:, 0] = semantic_code
+
+        for i in range(1, num_cb):
             residual_logits = self.model.fast_forward_cached(fast_hidden, fast_cache)
             if greedy:
                 residual_token = _fast_sample_greedy(residual_logits)
@@ -336,12 +368,8 @@ def _generate_codes_for_text_batch_patched(
             residual_token = mx.where(
                 continue_mask, residual_token, mx.zeros_like(residual_token)
             )
-            previous_codebooks = mx.concatenate(
-                [previous_codebooks, residual_token[:, None]], axis=1
-            )
+            codebook_buf[:, i] = residual_token
             fast_hidden = self.model.fast_embeddings(residual_token)
-
-        mx.eval(previous_codebooks)
 
         for idx, keep_generating in enumerate(should_continue):
             if not keep_generating:
@@ -351,17 +379,20 @@ def _generate_codes_for_text_batch_patched(
             previous_semantic_tokens[idx] = previous_semantic_tokens[idx][
                 -RAS_WIN_SIZE:
             ]
-            generated_steps[idx].append(previous_codebooks[idx])
+            generated_steps[idx].append(codebook_buf[idx])
             if step + 1 >= token_budgets[idx]:
                 finished[idx] = True
 
         next_input = mx.concatenate(
-            [semantic_token[:, None].astype(mx.int32), previous_codebooks], axis=1
+            [semantic_token[:, None].astype(mx.int32), codebook_buf], axis=1
         )
         attention_mask = mx.concatenate(
             [attention_mask, mx.ones((batch_size, 1), dtype=attention_mask.dtype)],
             axis=1,
         )
+
+        mx.eval(next_input)
+
         next_result = self.model(
             next_input[:, :, None],
             cache=cache,

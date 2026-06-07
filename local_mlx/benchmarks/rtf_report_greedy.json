@@ -1,6 +1,6 @@
 {
   "model_path": "/Users/op/fish-speech-int4-patch/checkpoints/fish-audio-s2-pro-8bit-mlx-normalized",
-  "load_seconds": 1.2782,
+  "load_seconds": 1.2669,
   "greedy": true,
   "cases": [
     {
@@ -8,42 +8,60 @@
       "text": "Hello.",
       "max_tokens": 8,
       "greedy": true,
-      "gen_seconds": 0.9401,
+      "gen_seconds": 0.759,
       "audio_seconds": 0.3715,
       "semantic_tokens": 8,
-      "rtf": 2.5303,
+      "rtf": 2.0429,
       "baseline_rtf": 3.99,
       "rtf_threshold": 3.0,
       "passed": true,
-      "patch_profile": {}
+      "patch_profile": {
+        "total_ms": 728.2399590039859,
+        "slow_ms": 330.59966801374685,
+        "fast_ms": 25.795041990932077,
+        "sample_ms": 369.0791249537142,
+        "semantic_steps": 8.0
+      }
     },
     {
       "name": "short_sentence",
       "text": "The quick brown fox jumps over the lazy dog.",
       "max_tokens": 256,
       "greedy": true,
-      "gen_seconds": 6.1594,
-      "audio_seconds": 3.1115,
-      "semantic_tokens": 67,
-      "rtf": 1.9796,
+      "gen_seconds": 5.976,
+      "audio_seconds": 3.065,
+      "semantic_tokens": 66,
+      "rtf": 1.9497,
       "baseline_rtf": 2.07,
       "rtf_threshold": 1.6,
       "passed": false,
-      "patch_profile": {}
+      "patch_profile": {
+        "total_ms": 5626.54699999257,
+        "slow_ms": 2757.3021620191867,
+        "fast_ms": 221.18525198311545,
+        "sample_ms": 2641.6547460394213,
+        "semantic_steps": 66.0
+      }
     },
     {
       "name": "played_sample",
       "text": "This is a slightly longer sample used to validate Fish S2 MLX latency after the fastpath patch.",
       "max_tokens": 256,
       "greedy": true,
-      "gen_seconds": 14.6495,
-      "audio_seconds": 6.7338,
-      "semantic_tokens": 145,
-      "rtf": 2.1755,
+      "gen_seconds": 13.5798,
+      "audio_seconds": 6.966,
+      "semantic_tokens": 150,
+      "rtf": 1.9494,
       "baseline_rtf": 2.08,
       "rtf_threshold": 1.5,
       "passed": false,
-      "patch_profile": {}
+      "patch_profile": {
+        "total_ms": 12329.558625002392,
+        "slow_ms": 6065.637212974252,
+        "fast_ms": 348.5735449648928,
+        "sample_ms": 5902.4634980014525,
+        "semantic_steps": 150.0
+      }
     }
   ],
   "all_passed": false
