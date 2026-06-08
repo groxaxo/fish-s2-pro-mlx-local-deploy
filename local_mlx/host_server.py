@@ -59,7 +59,9 @@ class FishMLXServer:
         self.model = None
         self.lock = threading.Lock()
         self.loaded_at: float | None = None
+        self.started_at = time.time()
         self.last_timing: dict[str, float | int] = {}
+        self.last_error: dict[str, Any] | None = None
         # In-flight synthesis counter (B1-T4). Mutated only under
         # ``self.queue_lock`` — ``+=`` on a bare int is not GIL-safe across
         # threads, so the dedicated lock is mandatory, not stylistic.
@@ -77,6 +79,29 @@ class FishMLXServer:
     def _snapshot_in_flight(self) -> int:
         with self.queue_lock:
             return self.in_flight
+
+    def _record_error(self, exc: BaseException) -> None:
+        """Record the most recent error for /health visibility (B8-T1)."""
+        self.last_error = {
+            "type": exc.__class__.__name__,
+            "message": str(exc),
+            "timestamp": time.time(),
+        }
+
+    def snapshot_health(self) -> dict[str, Any]:
+        """Build the extended /health payload (B8-T1)."""
+        return {
+            "ok": True,
+            "backend": "mlx-host",
+            "model_loaded": self.model is not None,
+            "hq_offline_only": True,
+            "default_max_tokens": DEFAULT_MAX_TOKENS,
+            "patch_applied": True,
+            "uptime_seconds": round(time.time() - self.started_at, 3),
+            "in_flight_requests": self._snapshot_in_flight(),
+            "last_request": dict(self.last_timing) if self.last_timing else None,
+            "last_error": self.last_error,
+        }
 
     def ensure_model(self):
         if self.model is None:
@@ -238,17 +263,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/health":
             fish = self.server.fish  # type: ignore[attr-defined]
-            self._json(
-                HTTPStatus.OK,
-                {
-                    "ok": True,
-                    "backend": "mlx-host",
-                    "model_loaded": fish.model is not None,
-                    "hq_offline_only": True,
-                    "default_max_tokens": DEFAULT_MAX_TOKENS,
-                    "patch_applied": True,
-                },
-            )
+            self._json(HTTPStatus.OK, fish.snapshot_health())
             return
         if self.path == "/v1/models":
             self._json(
@@ -288,6 +303,10 @@ class Handler(BaseHTTPRequestHandler):
             audio, media_type, timing = fish.synthesize(self._read_json())
             self._bytes(HTTPStatus.OK, audio, media_type, timing, queue_depth=fish._snapshot_in_flight())
         except Exception as exc:
+            # B8-T1: surface the failure in /health.last_error so a stuck or
+            # repeatedly-failing instance is not silent from the health
+            # endpoint.
+            fish._record_error(exc)
             self._json(
                 HTTPStatus.BAD_REQUEST,
                 {"error": {"message": str(exc), "type": exc.__class__.__name__}},
