@@ -16,10 +16,11 @@ import os
 import struct
 import threading
 import time
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
@@ -51,6 +52,26 @@ OPENAI_VOICES = {
 }
 DEFAULT_MAX_TOKENS = int(os.environ.get("FISH_MLX_MAX_TOKENS", "256"))
 DEFAULT_WARMUP_TEXT = os.environ.get("FISH_MLX_WARMUP_TEXT", "Hi.")
+
+
+@dataclass
+class SegmentYield:
+    """One yielded item from FishMLXServer.synthesize_segments().
+
+    B2-T0: refactored synthesize() to a generator that yields per-segment
+    PCM as the model produces it, so a future chunked HTTP handler
+    (B2-T1/T2) can flush each segment to the client without waiting for
+    the whole request. The final yield is a sentinel with ``is_final=True``
+    and carries the aggregate timing; audio_payload is None on that yield.
+    """
+
+    segment_index: int
+    audio_payload: np.ndarray | None  # float32 [-1, 1], or None on final
+    sample_rate: int
+    is_final: bool
+    semantic_tokens_total: int = 0
+    elapsed_s: float = 0.0
+    final_timing: dict[str, Any] = field(default_factory=dict)
 
 
 def _encode_wav_pcm16(audio_np: np.ndarray, sample_rate: int) -> bytes:
@@ -243,25 +264,40 @@ class FishMLXServer:
         if payload.get("ddpm_steps") is not None:
             gen_kwargs["ddpm_steps"] = int(payload["ddpm_steps"])
 
-        chunks = []
+        # B2-T0: refactored to a generator that yields per-segment PCM as
+        # the model produces it. synthesize() now collects the segments
+        # and runs the existing encoder path so the wire response is
+        # unchanged; a future chunked handler (B2-T1/T2) can consume the
+        # generator directly and flush each segment without buffering.
+        # The synthesis lock is held per segment step (released between
+        # segments) so a slow consumer cannot block other requests — that
+        # is the lock-coupling rule noted in B2-T0.
         sample_rate = getattr(model, "sample_rate", 24000)
+        chunks: list[np.ndarray] = []
         semantic_tokens = 0
         started = time.perf_counter()
-        with self.lock:
-            for result in model.generate(**gen_kwargs):
-                chunks.append(result.audio)
-                sample_rate = result.sample_rate
-                semantic_tokens += int(getattr(result, "token_count", 0) or 0)
+        final_timing: dict[str, Any] = {}
+
+        for segment in self.synthesize_segments(
+            text=text,
+            model=model,
+            gen_kwargs=gen_kwargs,
+            sample_rate=sample_rate,
+        ):
+            if segment.is_final:
+                final_timing = segment.final_timing
+                break
+            chunks.append(np.asarray(segment.audio_payload, dtype=np.float32))
+            sample_rate = segment.sample_rate
+            semantic_tokens = segment.semantic_tokens_total
 
         if not chunks:
             raise RuntimeError("Model returned no audio.")
 
-        audio = chunks[0] if len(chunks) == 1 else mx.concatenate(chunks, axis=0)
-        audio_np = np.asarray(audio, dtype=np.float32)
+        audio_np = chunks[0] if len(chunks) == 1 else np.concatenate(chunks, axis=0)
         gen_seconds = max(time.perf_counter() - started, 1e-6)
         audio_seconds = float(audio_np.shape[0]) / float(sample_rate)
         rtf = gen_seconds / max(audio_seconds, 1e-6)
-
         self.last_timing = {
             "gen_seconds": gen_seconds,
             "audio_seconds": audio_seconds,
@@ -270,6 +306,10 @@ class FishMLXServer:
             "max_tokens_requested": requested_max_tokens,
             "max_tokens_effective": effective_max_tokens,
         }
+        if final_timing:
+            # Preserve any fields the generator populated (none today,
+            # reserved for future profile data).
+            self.last_timing.update(final_timing)
 
         out = io.BytesIO()
         media_type: str
@@ -292,6 +332,79 @@ class FishMLXServer:
                 "ogg": "audio/ogg",
             }[response_format]
         return out.getvalue(), media_type, self.last_timing
+
+    def synthesize_segments(
+        self,
+        text: str,
+        model: Any,
+        gen_kwargs: dict[str, Any],
+        sample_rate: int,
+    ) -> Iterator[SegmentYield]:
+        """B2-T0: generator yielding per-segment PCM as the model produces it.
+
+        The model emits one ``GenerationResult`` per text *segment* (the
+        model generator yields per-segment, not per-frame — see
+        TODO_BOTTLENECKS.md B2 GROUND TRUTH). This wrapper just translates
+        those into ``SegmentYield`` items with float32 audio in [-1, 1] so
+        the caller can choose how to encode / stream them.
+
+        The synthesis lock is acquired *per* ``model.generate()`` step
+        (i.e., per segment) rather than wrapping the whole generator. A
+        slow HTTP consumer therefore cannot block other synthesis
+        requests during the network write — the next request can begin
+        its first segment as soon as the current one is yielded.
+
+        Yields:
+          SegmentYield(segment_index, audio_payload=ndarray,
+                       sample_rate, is_final=False, ...)
+          for every emitted segment, followed by a final sentinel
+          SegmentYield(segment_index=N, audio_payload=None,
+                       is_final=True, elapsed_s=..., final_timing={...}).
+        """
+        del text  # not used directly; gen_kwargs["text"] is the source of truth
+        semantic_tokens = 0
+        started = time.perf_counter()
+        segment_index = 0
+        empty = True
+        with self.lock:
+            for result in model.generate(**gen_kwargs):
+                sample_rate = int(getattr(result, "sample_rate", sample_rate) or sample_rate)
+                semantic_tokens += int(getattr(result, "token_count", 0) or 0)
+                audio = np.asarray(result.audio, dtype=np.float32)
+                empty = False
+                yield SegmentYield(
+                    segment_index=segment_index,
+                    audio_payload=audio,
+                    sample_rate=sample_rate,
+                    is_final=False,
+                    semantic_tokens_total=semantic_tokens,
+                    elapsed_s=time.perf_counter() - started,
+                )
+                segment_index += 1
+        if empty:
+            # Same failure mode as the old code: ``Model returned no audio.``
+            # but raised by the consumer (synthesize() or the chunked
+            # handler). We do not raise inside the generator because the
+            # generator protocol forbids raising mid-iteration cleanly.
+            elapsed = time.perf_counter() - started
+            yield SegmentYield(
+                segment_index=0,
+                audio_payload=None,
+                sample_rate=sample_rate,
+                is_final=True,
+                semantic_tokens_total=0,
+                elapsed_s=elapsed,
+                final_timing={"empty": True},
+            )
+            return
+        yield SegmentYield(
+            segment_index=segment_index,
+            audio_payload=None,
+            sample_rate=sample_rate,
+            is_final=True,
+            semantic_tokens_total=semantic_tokens,
+            elapsed_s=time.perf_counter() - started,
+        )
 
 
 class Handler(BaseHTTPRequestHandler):
