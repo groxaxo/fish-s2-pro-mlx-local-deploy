@@ -408,6 +408,15 @@ def main() -> None:
         "Fish S2 MLX is HQ/offline only; use VibeVoice/Chatterbox for live conversation.",
         flush=True,
     )
+    # B5-T3: make the default response format and its perf trade-off visible
+    # at startup, so operators picking response_format=flac/ogg don't get
+    # surprised by the post-generation encoding latency (~50-200 ms).
+    print(
+        "Default response format: wav (B5-T1 hand-rolled encoder, no sf.write "
+        "round-trip). FLAC/OGG still go through soundfile and incur ~50-200 ms "
+        "post-generation encoding latency. Pass response_format=wav to skip it.",
+        flush=True,
+    )
     httpd.serve_forever()
 
 

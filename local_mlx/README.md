@@ -73,7 +73,52 @@ Host defaults: `--no-lazy`, `--warmup`, `FISH_MLX_MAX_TOKENS=256`, `PYTHONPATH` 
 Optional request flags on `:8881`:
 
 - `greedy: true` — sets `temperature=0` and uses compiled argmax on the fast residual path
-- Response headers: `X-Gen-Seconds`, `X-Audio-Seconds`, `X-RTF`, `X-Semantic-Tokens`, `X-Max-Tokens-Effective`
+- Response headers: `X-Gen-Seconds`, `X-Audio-Seconds`, `X-RTF`, `X-Semantic-Tokens`, `X-Max-Tokens-Effective`, `X-Queue-Depth` (current in-flight synthesis count)
+
+## Response format and encoding latency
+
+Default `response_format` is `wav`. The host encodes WAV with a hand-rolled
+`struct.pack` 44-byte RIFF/WAVE header + int16 PCM (B5-T1) — no
+`BytesIO` round-trip, no `soundfile` C-extension call. Audio is
+perceptually identical to `sf.write(..., format="WAV")` (max ~2 LSB
+difference on full-scale random audio, see
+`tests/test_b5t1_wav_encoder.py`).
+
+`response_format=flac` and `response_format=ogg` still go through
+`soundfile.write` and incur **~50–200 ms of post-generation encoding
+latency** on top of the model's generation time. If you need TTFB, stick
+to `wav`. (See `TODO_BOTTLENECKS.md` B5-T2 / B2-T3 — making FLAC/OGG
+streamable is a larger change, tracked in the bottleneck plan, not
+shipped here.)
+
+## Health endpoint
+
+`GET /health` returns the extended payload (B8-T1):
+
+```json
+{
+  "ok": true,
+  "backend": "mlx-host",
+  "model_loaded": true,
+  "hq_offline_only": true,
+  "default_max_tokens": 256,
+  "patch_applied": true,
+  "uptime_seconds": 1234.5,
+  "in_flight_requests": 0,
+  "last_request": {
+    "gen_seconds": 1.05,
+    "audio_seconds": 3.0,
+    "rtf": 0.35,
+    "semantic_tokens": 64,
+    "max_tokens_requested": 256,
+    "max_tokens_effective": 256
+  },
+  "last_error": null
+}
+```
+
+A stuck or repeatedly-failing instance is no longer silent from the
+health endpoint.
 
 ## Smoke checks
 
