@@ -310,6 +310,24 @@ def _generate_codes_for_text_batch_patched(
     # Allocate fast cache once; reuse across all steps via trim()
     fast_cache = self.model.make_fast_cache()
 
+    # B3-T2: pre-allocate next_input_buf of shape (batch_size, num_cb+1, 1)
+    # and the attention mask at its final length. Replaces the per-step
+    # ``mx.concatenate`` at the old lines 386-388 / 389-391. Buffer is safe
+    # to reuse because ``mx.eval(next_input)`` still runs every step
+    # (line 403), materialising the value before the next overwrite aliases
+    # it. Mask is sliced at call time (``mask_len``) instead of grown.
+    next_input_buf = mx.zeros((batch_size, num_cb + 1, 1), dtype=mx.int32)
+    initial_prompt_len = int(attention_mask.shape[1])
+    mask_max_len = initial_prompt_len + max_budget
+    full_attention_mask = mx.ones(
+        (batch_size, mask_max_len), dtype=attention_mask.dtype
+    )
+    # Copy the initial prompt mask into the pre-allocated buffer so the
+    # leftmost columns match the original attention_mask the prompt was
+    # built against.
+    full_attention_mask[:, :initial_prompt_len] = attention_mask
+    mask_len = initial_prompt_len
+
     for step in range(max_budget):
         active = [
             (not finished[idx]) and step < token_budgets[idx]
@@ -392,20 +410,25 @@ def _generate_codes_for_text_batch_patched(
             if step + 1 >= token_budgets[idx]:
                 finished[idx] = True
 
-        next_input = mx.concatenate(
-            [semantic_token[:, None].astype(mx.int32), codebook_buf], axis=1
-        )
-        attention_mask = mx.concatenate(
-            [attention_mask, mx.ones((batch_size, 1), dtype=attention_mask.dtype)],
-            axis=1,
-        )
+        # B3-T2: in-place fill of the pre-allocated buffers replaces the
+        # per-step ``mx.concatenate`` at the old lines 386-388 (next_input)
+        # and 389-391 (attention_mask). next_input_buf is shape
+        # (batch_size, num_cb+1, 1); we assign the semantic token to column
+        # 0 and the codebook row to columns 1:. attention_mask is
+        # pre-allocated at full length; we advance ``mask_len`` and slice
+        # the leftmost columns at the call site.
+        next_input_buf[:, 0, 0] = semantic_token
+        next_input_buf[:, 1:, 0] = codebook_buf
+        full_attention_mask[:, mask_len] = 1
+        mask_len += 1
+        current_attention_mask = full_attention_mask[:, :mask_len]
 
-        mx.eval(next_input)
+        mx.eval(next_input_buf)
 
         next_result = self.model(
-            next_input[:, :, None],
+            next_input_buf,
             cache=cache,
-            attention_mask=attention_mask,
+            attention_mask=current_attention_mask,
         )
         logits = next_result.logits[:, -1]
         hidden_state = next_result.hidden_states[:, -1]
