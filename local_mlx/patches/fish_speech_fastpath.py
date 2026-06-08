@@ -137,6 +137,16 @@ def _generate_codes_for_batch_patched(
     # Allocate fast cache once; reuse across all semantic steps via trim()
     fast_cache = self.model.make_fast_cache()
 
+    # B3-T1: pre-allocate next_input_buf of shape (1, num_cb+1, 1) once and
+    # overwrite in place at every step. The previous per-step
+    # ``mx.concatenate`` allocated a fresh buffer and forced a copy barrier on
+    # every iteration; for a 256-token sequence that was 256 small
+    # allocations. The buffer is safe to reuse because the loop forces
+    # ``mx.eval(next_input)`` (line 224 in profile mode, line 239 in
+    # production) every step, materialising the value before the next
+    # overwrite aliases it.
+    next_input_buf = mx.zeros((1, num_cb + 1, 1), dtype=mx.int32)
+
     for step in range(semantic_token_budget):
         # Phase 1: Sample semantic token (includes pending graph evaluation)
         if _PROFILE_ENABLED:
@@ -211,13 +221,12 @@ def _generate_codes_for_batch_patched(
         generated_steps.append(codebook_row)
 
         # Phase 3: Build next input + eval + slow model step
-        next_input = mx.concatenate(
-            [
-                semantic_token[:, None].astype(mx.int32),
-                codebook_row[None, :],
-            ],
-            axis=1,
-        )
+        # B3-T1: in-place fill of the pre-allocated buffer replaces the
+        # per-step ``mx.concatenate``. See the comment on next_input_buf
+        # above for the eval-safety argument.
+        next_input_buf[:, 0, 0] = semantic_token
+        next_input_buf[:, 1:, 0] = codebook_row
+        next_input = next_input_buf
 
         if _PROFILE_ENABLED:
             ts = time.perf_counter()
@@ -225,7 +234,7 @@ def _generate_codes_for_batch_patched(
             eval_ms += time.perf_counter() - ts
             ts = time.perf_counter()
 
-        next_result = self.model(next_input[:, :, None], cache=cache)
+        next_result = self.model(next_input, cache=cache)
         logits = next_result.logits[:, -1]
         hidden_state = next_result.hidden_states[:, -1]
 

@@ -1,0 +1,71 @@
+{
+  "model_path": "/Users/op/fish-speech-int4-patch/checkpoints/fish-audio-s2-pro-8bit-mlx-normalized",
+  "load_seconds": 2.3679,
+  "greedy": false,
+  "cases": [
+    {
+      "name": "hello_8_tokens",
+      "text": "Hello.",
+      "max_tokens": 8,
+      "greedy": false,
+      "gen_seconds": 0.7664,
+      "audio_seconds": 0.3715,
+      "semantic_tokens": 8,
+      "rtf": 2.0629,
+      "baseline_rtf": 3.99,
+      "rtf_threshold": 3.0,
+      "passed": true,
+      "patch_profile": {
+        "total_ms": 705.6153749581426,
+        "slow_ms": 304.12958294618875,
+        "fast_ms": 315.2657480095513,
+        "sample_ms": 82.71608402719721,
+        "eval_ms": 1.6164160333573818,
+        "semantic_steps": 8.0
+      }
+    },
+    {
+      "name": "short_sentence",
+      "text": "The quick brown fox jumps over the lazy dog.",
+      "max_tokens": 256,
+      "greedy": false,
+      "gen_seconds": 6.7147,
+      "audio_seconds": 3.4366,
+      "semantic_tokens": 74,
+      "rtf": 1.9539,
+      "baseline_rtf": 2.07,
+      "rtf_threshold": 1.6,
+      "passed": false,
+      "patch_profile": {
+        "total_ms": 5951.04541699402,
+        "slow_ms": 2831.5887911012396,
+        "fast_ms": 2943.4434982249513,
+        "sample_ms": 156.9837938877754,
+        "eval_ms": 15.107295766938478,
+        "semantic_steps": 74.0
+      }
+    },
+    {
+      "name": "played_sample",
+      "text": "This is a slightly longer sample used to validate Fish S2 MLX latency after the fastpath patch.",
+      "max_tokens": 256,
+      "greedy": false,
+      "gen_seconds": 12.1887,
+      "audio_seconds": 6.2229,
+      "semantic_tokens": 134,
+      "rtf": 1.9587,
+      "baseline_rtf": 2.08,
+      "rtf_threshold": 1.5,
+      "passed": false,
+      "patch_profile": {
+        "total_ms": 10856.90162499668,
+        "slow_ms": 5207.485122431535,
+        "fast_ms": 5380.8745869318955,
+        "sample_ms": 235.01384357223287,
+        "eval_ms": 27.07841293886304,
+        "semantic_steps": 134.0
+      }
+    }
+  ],
+  "all_passed": false
+}
