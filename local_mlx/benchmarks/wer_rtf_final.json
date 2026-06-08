@@ -1,0 +1,75 @@
+{
+  "tag": "final",
+  "tts_url": "http://127.0.0.1:8881/v1/audio/speech",
+  "stt_url": "http://127.0.0.1:5093",
+  "n_sentences": 5,
+  "n_successful": 5,
+  "avg_wer": 0.2433,
+  "max_wer": 1.0,
+  "avg_rtf": 2.2052,
+  "median_rtf": 2.2774,
+  "avg_gen_seconds": 11.7811,
+  "avg_audio_seconds": 5.3406,
+  "sentences": [
+    {
+      "id": "S1",
+      "text": "Hello.",
+      "status": "ok",
+      "tts_elapsed_s": 1.9555,
+      "audio_seconds": 0.835918,
+      "rtf": 2.335264,
+      "semantic_tokens": 18,
+      "transcript": "Hello, said",
+      "wer": 1.0,
+      "error": null
+    },
+    {
+      "id": "S2",
+      "text": "The quick brown fox jumps over the lazy dog, then rests beneath a silver birch.",
+      "status": "ok",
+      "tts_elapsed_s": 13.23,
+      "audio_seconds": 5.804989,
+      "rtf": 2.277401,
+      "semantic_tokens": 125,
+      "transcript": "The quick brown fox jumps over the lazy dog then rests beneath a silver birch.",
+      "wer": 0.0,
+      "error": null
+    },
+    {
+      "id": "S3",
+      "text": "Speech synthesis is computationally expensive, but modern accelerators help.",
+      "status": "ok",
+      "tts_elapsed_s": 8.4991,
+      "audio_seconds": 4.551111,
+      "rtf": 1.865756,
+      "semantic_tokens": 98,
+      "transcript": "Synthesis is computationally expensive, but modern accelerators help.",
+      "wer": 0.1111,
+      "error": null
+    },
+    {
+      "id": "S4",
+      "text": "Can you hear the difference between warm and cold audio quality?",
+      "status": "ok",
+      "tts_elapsed_s": 8.2775,
+      "audio_seconds": 3.622313,
+      "rtf": 2.282352,
+      "semantic_tokens": 78,
+      "transcript": "Can you hear the difference between warm and cold audio quality?",
+      "wer": 0.0,
+      "error": null
+    },
+    {
+      "id": "S5",
+      "text": "On a clear morning, the harbour glittered as fishing boats returned with the night's catch. Vendors shouted prices, gulls wheeled overhead, and the air smelled of salt, smoke, and fresh bread from the bakery on the quay.",
+      "status": "ok",
+      "tts_elapsed_s": 26.9432,
+      "audio_seconds": 11.888617,
+      "rtf": 2.264998,
+      "semantic_tokens": 256,
+      "transcript": "On a clear morning, the harbour glittered as fishing boats returned with the night's catch. Vendors shouted prices, gulls wheeled overhead, and the air smelled of salt, smoke, and fresh bread from the basin.",
+      "wer": 0.1053,
+      "error": null
+    }
+  ]
+}
