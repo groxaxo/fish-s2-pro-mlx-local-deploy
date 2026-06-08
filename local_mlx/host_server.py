@@ -60,6 +60,23 @@ class FishMLXServer:
         self.lock = threading.Lock()
         self.loaded_at: float | None = None
         self.last_timing: dict[str, float | int] = {}
+        # In-flight synthesis counter (B1-T4). Mutated only under
+        # ``self.queue_lock`` — ``+=`` on a bare int is not GIL-safe across
+        # threads, so the dedicated lock is mandatory, not stylistic.
+        self.in_flight = 0
+        self.queue_lock = threading.Lock()
+
+    def _inc_in_flight(self) -> None:
+        with self.queue_lock:
+            self.in_flight += 1
+
+    def _dec_in_flight(self) -> None:
+        with self.queue_lock:
+            self.in_flight -= 1
+
+    def _snapshot_in_flight(self) -> int:
+        with self.queue_lock:
+            return self.in_flight
 
     def ensure_model(self):
         if self.model is None:
@@ -178,11 +195,13 @@ class FishMLXServer:
 class Handler(BaseHTTPRequestHandler):
     server_version = "FishMLXHTTP/1.0"
 
-    def _json(self, status: int, body: dict[str, Any]) -> None:
+    def _json(self, status: int, body: dict[str, Any], queue_depth: int | None = None) -> None:
         encoded = json.dumps(body).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
+        if queue_depth is not None:
+            self.send_header("X-Queue-Depth", str(queue_depth))
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -192,10 +211,13 @@ class Handler(BaseHTTPRequestHandler):
         body: bytes,
         media_type: str,
         timing: dict[str, float | int] | None = None,
+        queue_depth: int | None = None,
     ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", media_type)
         self.send_header("Content-Length", str(len(body)))
+        if queue_depth is not None:
+            self.send_header("X-Queue-Depth", str(queue_depth))
         if timing:
             self.send_header("X-Gen-Seconds", f"{timing['gen_seconds']:.6f}")
             self.send_header("X-Audio-Seconds", f"{timing['audio_seconds']:.6f}")
@@ -256,14 +278,23 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/v1/audio/speech":
             self._json(HTTPStatus.NOT_FOUND, {"error": {"message": "Not found"}})
             return
+        fish = self.server.fish  # type: ignore[attr-defined]
+        # B1-T4: track in-flight synthesis depth (counter mutation is GIL-unsafe
+        # for ``+=`` on a bare int, so we go through the dedicated lock on
+        # FishMLXServer). Decrement always runs in ``finally`` so exceptions
+        # don't strand the counter and stall back-pressure.
+        fish._inc_in_flight()
         try:
-            audio, media_type, timing = self.server.fish.synthesize(self._read_json())  # type: ignore[attr-defined]
-            self._bytes(HTTPStatus.OK, audio, media_type, timing)
+            audio, media_type, timing = fish.synthesize(self._read_json())
+            self._bytes(HTTPStatus.OK, audio, media_type, timing, queue_depth=fish._snapshot_in_flight())
         except Exception as exc:
             self._json(
                 HTTPStatus.BAD_REQUEST,
                 {"error": {"message": str(exc), "type": exc.__class__.__name__}},
+                queue_depth=fish._snapshot_in_flight(),
             )
+        finally:
+            fish._dec_in_flight()
 
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[{self.log_date_time_string()}] {self.address_string()} {fmt % args}", flush=True)
