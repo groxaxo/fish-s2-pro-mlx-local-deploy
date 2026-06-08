@@ -12,6 +12,7 @@ import sys
 import io
 import json
 import os
+import struct
 import threading
 import time
 from http import HTTPStatus
@@ -49,6 +50,39 @@ OPENAI_VOICES = {
 }
 DEFAULT_MAX_TOKENS = int(os.environ.get("FISH_MLX_MAX_TOKENS", "256"))
 DEFAULT_WARMUP_TEXT = os.environ.get("FISH_MLX_WARMUP_TEXT", "Hi.")
+
+
+def _encode_wav_pcm16(audio_np: np.ndarray, sample_rate: int) -> bytes:
+    """Encode a float32 mono audio array to a 16-bit PCM RIFF/WAVE byte string.
+
+    B5-T1: hand-rolled replacement for ``soundfile.write(..., format="WAV")``
+    that skips the intermediate ``BytesIO`` and the C extension call. The
+    model emits float32 in ``[-1, 1]`` — clip and scale to int16 before
+    packing the header, otherwise the output is near-silence.
+
+    Returns the full WAV file bytes (header + PCM data).
+    """
+    pcm = (np.clip(audio_np, -1.0, 1.0) * 32767.0).astype(np.int16)
+    data_bytes = pcm.tobytes()
+    # fmt chunk: PCM (format=1), 1 channel, sample_rate, byte_rate=rate*2,
+    # block_align=2 (16-bit mono), bits_per_sample=16
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + len(data_bytes),
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,  # PCM
+        1,  # num channels
+        sample_rate,
+        sample_rate * 2,  # byte rate (rate * block_align)
+        2,  # block align
+        16,  # bits per sample
+        b"data",
+        len(data_bytes),
+    )
+    return header + data_bytes
 
 
 class FishMLXServer:
@@ -208,12 +242,25 @@ class FishMLXServer:
         }
 
         out = io.BytesIO()
-        sf.write(out, audio_np, sample_rate, format=response_format.upper())
-        media_type = {
-            "wav": "audio/wav",
-            "flac": "audio/flac",
-            "ogg": "audio/ogg",
-        }[response_format]
+        media_type: str
+        if response_format == "wav":
+            # B5-T1: hand-rolled 44-byte RIFF/WAVE header + int16 PCM. Skips
+            # the intermediate BytesIO + soundfile C-extension round-trip and
+            # makes the float32->int16 conversion explicit. The model output
+            # is float32 in [-1, 1] (audio_np = np.asarray(audio,
+            # dtype=np.float32)) — sf.write() scaled this automatically; the
+            # new path must scale or it emits near-silence. Scale first,
+            # header sizes from the *PCM* byte count (not the float array's
+            # nbytes), otherwise the data chunk is mis-sized and downstream
+            # decoders either truncate or reject the file.
+            out.write(_encode_wav_pcm16(audio_np, sample_rate))
+            media_type = "audio/wav"
+        else:
+            sf.write(out, audio_np, sample_rate, format=response_format.upper())
+            media_type = {
+                "flac": "audio/flac",
+                "ogg": "audio/ogg",
+            }[response_format]
         return out.getvalue(), media_type, self.last_timing
 
 
