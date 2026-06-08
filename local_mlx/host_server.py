@@ -8,6 +8,7 @@ server runs on macOS and is fronted by the Docker proxy in this directory.
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 import io
 import json
@@ -85,6 +86,16 @@ def _encode_wav_pcm16(audio_np: np.ndarray, sample_rate: int) -> bytes:
     return header + data_bytes
 
 
+# B7-T1: graceful-shutdown state. The signal handler in main() sets
+# ``shutdown_event`` and spawns a daemon thread to do the drain+evict
+# sequence. The signal handler itself only flips the flag — calling
+# ``httpd.shutdown()`` from a main-thread signal handler would deadlock
+# because ``shutdown()`` blocks until ``serve_forever()`` returns, and
+# ``serve_forever()`` is the loop the handler is interrupting.
+DEFAULT_DRAIN_TIMEOUT_S = 30.0
+DRAIN_POLL_INTERVAL_S = 0.1
+
+
 class FishMLXServer:
     def __init__(self, model_path: Path, lazy: bool, warmup: bool):
         self.model_path = model_path
@@ -136,6 +147,25 @@ class FishMLXServer:
             "last_request": dict(self.last_timing) if self.last_timing else None,
             "last_error": self.last_error,
         }
+
+    def evict_model(self) -> None:
+        """B7-T1: drop the loaded model weights and free MLX caches.
+
+        Called from the shutdown handler after the in-flight request drain.
+        Idempotent: a second call is a no-op if the model is already gone.
+        """
+        with self.lock:
+            if self.model is None:
+                return
+            print(
+                f"Evicting model from {self.model_path} (in-flight={self._snapshot_in_flight()})",
+                flush=True,
+            )
+            self.model = None
+            try:
+                mx.clear_cache()
+            except Exception as exc:  # pragma: no cover - best-effort
+                print(f"mx.clear_cache() during evict raised {exc!r}", flush=True)
 
     def ensure_model(self):
         if self.model is None:
@@ -417,7 +447,74 @@ def main() -> None:
         "post-generation encoding latency. Pass response_format=wav to skip it.",
         flush=True,
     )
-    httpd.serve_forever()
+
+    # B7-T1: graceful shutdown. Signal handlers only set the event; the
+    # actual drain + evict + httpd.shutdown() runs in a short-lived
+    # thread so the main serve_forever loop is unblocked and can return
+    # after shutdown() is called from the worker thread.
+    shutdown_event = threading.Event()
+
+    def _on_signal(signum: int, _frame: Any) -> None:
+        signame = signal.Signals(signum).name
+        if shutdown_event.is_set():
+            return  # idempotent — repeated Ctrl-C / SIGTERM is a no-op
+        print(
+            f"Received {signame}; beginning graceful shutdown "
+            f"(drain timeout={DEFAULT_DRAIN_TIMEOUT_S}s).",
+            flush=True,
+        )
+        shutdown_event.set()
+
+        def _drain_and_stop() -> None:
+            # 1. Wait for in-flight synthesis to drain (B1-T4 counter).
+            started = time.perf_counter()
+            while (
+                httpd.fish._snapshot_in_flight() > 0
+                and (time.perf_counter() - started) < DEFAULT_DRAIN_TIMEOUT_S
+            ):
+                time.sleep(DRAIN_POLL_INTERVAL_S)
+            remaining = httpd.fish._snapshot_in_flight()
+            elapsed = time.perf_counter() - started
+            if remaining:
+                print(
+                    f"Drain timeout reached after {elapsed:.2f}s with "
+                    f"{remaining} in-flight request(s); forcing shutdown.",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"In-flight requests drained in {elapsed:.3f}s.",
+                    flush=True,
+                )
+
+            # 2. Evict the model so the next start is fast + memory is freed.
+            httpd.fish.evict_model()
+
+            # 3. Stop the serve_forever loop. Safe to call from a non-
+            # serving thread; BaseServer is designed for this.
+            httpd.shutdown()
+            print("Server stopped; exiting with code 0.", flush=True)
+            os._exit(0)
+
+        threading.Thread(
+            target=_drain_and_stop, name="fish-mlx-shutdown", daemon=True
+        ).start()
+
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+    if hasattr(signal, "SIGHUP"):
+        # Reload-config signal on macOS LaunchAgents. Treat as a soft
+        # restart request — the LaunchAgent KeepAlive will respawn us
+        # with the new code.
+        signal.signal(signal.SIGHUP, _on_signal)
+
+    try:
+        httpd.serve_forever()
+    finally:
+        # If serve_forever returned for any other reason (e.g., the
+        # shutdown thread won the race), still try to evict so a follow-up
+        # process does not see the model resident in unified memory.
+        httpd.fish.evict_model()
 
 
 if __name__ == "__main__":
