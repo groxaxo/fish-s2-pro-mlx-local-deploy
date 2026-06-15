@@ -136,6 +136,7 @@ The upstream S2-Pro model is outstanding, but the default out-of-box setup assum
 
 - [12 GB install guide](docs/en/install.md)
 - [Server guide](docs/en/server.md)
+- [Apple Silicon (MLX) local serving](local_mlx/README.md) — run the 8-bit build natively on a Mac, OpenAI `/v1` API, no CUDA
 - [Command line inference](https://speech.fish.audio/inference/#command-line-inference)
 - [WebUI inference](https://speech.fish.audio/inference/#webui-inference)
 - [Docker setup](https://speech.fish.audio/install/#docker-setup)
@@ -194,7 +195,9 @@ Righto — the H200 cloud numbers further down are mean as, but most of us aren'
 
 **Straight up, no spin:** she sits at about **RTF 3.8** — roughly 0.27× real-time — so it's an offline workhorse, not a live-yarn machine. The handbrake is semantic-token generation chugging along at ~5.7 tok/s; the codec's barely breaking a sweat. Cold start's ~23 s while the weights load, then she's good as gold — no per-request load tax after that.
 
-Every clip got run back through ASR on `:5093` to make sure it's actual speech and not a fistful of static — transcribed clean, peaks sitting 0.53–0.93. And don't bother with the 4-bit conversions, eh — both of them decode to noise (ASR comes back empty), so **8-bit's the one**. Sweet as.
+Every clip got run back through ASR on `:5093` to make sure it's actual speech and not a fistful of static — transcribed clean, peaks sitting 0.53–0.93. And don't bother with the **MLX** 4-bit conversions, eh (the Apple-Silicon affine-quant builds — a different beast entirely to this fork's CUDA `bnb4` NF4 build, which is grand): both of them decode to noise on MLX, ASR comes back empty, so on Mac **8-bit's the one**. Sweet as.
+
+Full setup — the OpenAI `/v1` API, the two servers (`:8881` eager, `:8882` lazy), env vars and the ASR check — lives in [`local_mlx/README.md`](local_mlx/README.md).
 
 > Honest single-box measurements, not a leaderboard flex. Your mileage'll shift with the chip and how warm the caches are.
 

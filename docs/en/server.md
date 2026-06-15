@@ -20,6 +20,20 @@ That default launcher gives you:
 - automatic shutdown after **300 seconds** of inactivity
 - port cleanup before startup if `8880` is already occupied
 
+## Apple Silicon (MLX) alternative — no CUDA
+
+On a Mac there's no CUDA, so the `bnb4` path doesn't apply. Use the native MLX
+servers in [`local_mlx/`](../../local_mlx/README.md) instead — they serve the same
+OpenAI-compatible `/v1/audio/speech` API from the **8-bit normalized** checkpoint:
+
+- `host_server.py` on `:8881` (eager load + warmup — the perf reference)
+- `fastapi_v1_server.py` on `:8882` (lazy load + idle evict)
+
+Measured warmed throughput is **RTF ≈ 3.8** (~5.7 semantic tok/s) — an offline
+workhorse, ASR-verified on `:5093`. **Use 8-bit only**: the MLX 4-bit conversions
+decode to noise (this is the Apple-Silicon affine quant, unrelated to the CUDA NF4
+build above). See [`local_mlx/README.md`](../../local_mlx/README.md) for the full guide.
+
 ## API Server Inference
 
 Fish Speech provides an HTTP API server entrypoint at `tools/api_server.py`.
