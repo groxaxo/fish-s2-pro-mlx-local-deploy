@@ -6,6 +6,30 @@ HQ/offline Fish S2 MLX — **not** for live conversation. Use VibeVoice or Chatt
 This deployment uses `cs2764/fish-audio-s2-pro-8bit-mlx`, normalized into
 `checkpoints/fish-audio-s2-pro-8bit-mlx-normalized`.
 
+## Model selection — use 8-bit, never 4-bit
+
+The **8-bit normalized** checkpoint is the only ASR-verified working build and is
+the default for both servers. **Do not use the 4-bit conversions**
+(`ekryski/fish-audio-s2-pro-4bit`, `majentik/fishaudio-s2-pro-MLX-4bit`): both
+decode to **near-silent noise**, confirmed with the ASR on `:5093` (empty
+transcription for every 4-bit file; the 8-bit control transcribes correctly). The
+4-bit quantization degrades the text/semantic model itself, so even keeping the
+codec at full precision (as `majentik` does, via a separate `codec.pth`) does not
+recover intelligible speech.
+
+### Always ASR-verify output
+
+"It loaded and emitted samples" is **not** proof of intelligible speech. After any
+synthesis, corroborate with the macOS speech-server ASR on `:5093`:
+
+```bash
+curl -s -X POST http://127.0.0.1:5093/v1/audio/transcriptions \
+  -F file=@out.wav -F model=whisper-1 -F response_format=text
+```
+
+An empty transcription (or peak amplitude ≲ 0.02) means the audio is noise/silence
+— the 4-bit failure mode.
+
 Docker Desktop on Apple Silicon runs Linux containers and cannot access Apple
 Metal/MLX directly:
 
@@ -170,6 +194,38 @@ typically passes; longer clips may still exceed gates (~2.0 RTF) — see below.
 ## If RTF is still too high
 
 See [UPSTREAM_OPTIONS.md](UPSTREAM_OPTIONS.md) for upstream PR, Swift prototype, or CUDA server paths.
+
+## OpenAI `/v1` FastAPI server (`:8882`)
+
+`fastapi_v1_server.py` is a thin FastAPI wrapper around the same `FishMLXServer`
+core, for setups that want a light footprint with lazy load + idle eviction. It
+defaults to the 8-bit normalized checkpoint (relative path, matching
+`host_server.py`).
+
+```bash
+python local_mlx/fastapi_v1_server.py --host 127.0.0.1 --port 8882
+# model loads on the first /v1/audio/speech request, evicts after idle
+```
+
+Endpoints: `GET /health`, `GET /v1/models`, `POST /v1/audio/speech` (same OpenAI
+schema and `X-RTF`/`X-Gen-Seconds`/… timing headers as `:8881`).
+
+Environment variables:
+
+| Var | Default | Meaning |
+|---|---|---|
+| `FISH_MLX_MODEL_PATH` | `checkpoints/fish-audio-s2-pro-8bit-mlx-normalized` | Model snapshot dir. |
+| `FISH_MLX_LOAD_MODE` | `lazy` | `lazy` or `eager`. |
+| `FISH_MLX_WARMUP` | `0` | `1` to warm caches at startup. |
+| `FISH_MLX_IDLE_TIMEOUT_S` | `300` | Evict model after this idle window. |
+| `FISH_MLX_EVICT_INTERVAL_S` | `15` | Eviction-check interval. |
+| `PORT` | `8882` | Listen port. |
+
+Difference vs `host_server.py` (`:8881`): that server defaults to **eager load +
+warmup** (low first-request latency, the reference perf path); this one defaults to
+**lazy + evict** (loads on demand). For a warmed comparison the `:8881` server gives
+synthesis **RTF ≈ 3.8** (non-greedy HTTP path, ~5.7 tok/s); the `profile_generation.py`
+greedy fast-path gates above are lower because they exclude HTTP + stochastic sampling.
 
 ## Checkpoint normalization
 
