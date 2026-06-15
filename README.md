@@ -1,7 +1,7 @@
 <div align="center">
 <h1>Fish Speech — 12 GB Ready BnB NF4 Fork</h1>
 
-**English** | [简体中文](docs/README.zh.md) | [Portuguese](docs/README.pt-BR.md) | [日本語](docs/README.ja.md) | [한국어](docs/README.ko.md) | [العربية](docs/README.ar.md) <br>
+**English** | [Español](docs/README.es.md) <br>
 
 > **This is a community fork** of [fishaudio/fish-speech](https://github.com/fishaudio/fish-speech) that adds **bitsandbytes NF4 4-bit quantization** support, enabling inference on GPUs with as little as 12 GB of VRAM.  
 > Huge thanks to the amazing team at [Fish Audio](https://fish.audio/) for building and open-sourcing the original Fish Speech model — all credit for the core research and architecture belongs to them.
