@@ -102,6 +102,21 @@ Mais detalhes podem ser encontrados no [relatório técnico](https://arxiv.org/a
 
 No Seed-TTS Eval, o S2 obteve o menor WER entre todos os modelos avaliados, incluindo sistemas fechados: Qwen3-TTS (0.77/1.24), MiniMax Speech-02 (0.99/1.90) e Seed-TTS (1.12/2.25). No Audio Turing Test, o valor 0.515 supera o Seed-TTS (0.417) em 24% e o MiniMax-Speech (0.387) em 33%. No EmergentTTS-Eval, o S2 se destacou especialmente em paralinguística (91.61%), perguntas (84.41%) e complexidade sintática (83.39%).
 
+## Benchmarks Locais — Apple Silicon (MLX, 8-bit)
+
+Os números do H200 abaixo são de uma GPU de datacenter. Veja como o **build 8-bit MLX** realmente se comporta em um Mac Apple Silicon comum — medido no servidor `local_mlx` já aquecido (`:8881`), com a GPU dedicada.
+
+| Trecho | Áudio gerado | Tempo de geração | RTF (geração ÷ áudio) | tokens semânticos/s |
+|--------|--------------|------------------|-----------------------|---------------------|
+| Curto  | 4.55 s  | 17.0 s | 3.74 | 5.8 |
+| Médio  | 7.66 s  | 28.4 s | 3.70 | 5.8 |
+| Longo  | 11.89 s | 45.4 s | 3.82 | 5.6 |
+| **Total** | **24.1 s** | **90.7 s** | **3.77** | **~5.7** |
+
+Roda a cerca de **RTF 3.8** (~0.27× tempo real) — um cavalo de batalha offline, não um motor de streaming de baixa latência. O gargalo é a geração de tokens semânticos (~5.7 tok/s), não o codec. A partida a frio leva ~23 s para carregar os pesos, sem custo de carga por requisição depois disso.
+
+Cada trecho foi verificado por ASR em `:5093` (transcrito corretamente, picos 0.53–0.93). Use **apenas 8-bit**: as conversões 4-bit em MLX decodificam como ruído (esta é a quantização afim do Apple Silicon, sem relação com o build CUDA `bnb4` NF4 deste fork). Guia completo: [`local_mlx/README.md`](../local_mlx/README.md).
+
 ## Destaques
 
 <img src="./assets/totalability.png" width=200%>
