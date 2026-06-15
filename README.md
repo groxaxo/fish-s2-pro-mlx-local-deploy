@@ -181,6 +181,23 @@ More details of the model can be found in the [technical report](https://arxiv.o
 
 On Seed-TTS Eval, S2 achieves the lowest WER among all evaluated models including closed-source systems: Qwen3-TTS (0.77/1.24), MiniMax Speech-02 (0.99/1.90), Seed-TTS (1.12/2.25). On the Audio Turing Test, 0.515 surpasses Seed-TTS (0.417) by 24% and MiniMax-Speech (0.387) by 33%. On EmergentTTS-Eval, S2 achieves particularly strong results in paralinguistics (91.61% win rate), questions (84.41%), and syntactic complexity (83.39%).
 
+## Local Benchmarks — Apple Silicon (MLX, 8-bit)
+
+Righto — the H200 cloud numbers further down are mean as, but most of us aren't running an H200 under the desk. So here's how the **8-bit MLX build** actually goes on a bog-standard Apple Silicon Mac: measured on the warmed `local_mlx` server (`:8881`), GPU all to itself, no fudging the figures.
+
+| Clip | Audio out | Gen time | RTF (gen ÷ audio) | Semantic tok/s |
+|------|-----------|----------|-------------------|----------------|
+| Short  | 4.55 s  | 17.0 s | 3.74 | 5.8 |
+| Medium | 7.66 s  | 28.4 s | 3.70 | 5.8 |
+| Long   | 11.89 s | 45.4 s | 3.82 | 5.6 |
+| **All up** | **24.1 s** | **90.7 s** | **3.77** | **~5.7** |
+
+**Straight up, no spin:** she sits at about **RTF 3.8** — roughly 0.27× real-time — so it's an offline workhorse, not a live-yarn machine. The handbrake is semantic-token generation chugging along at ~5.7 tok/s; the codec's barely breaking a sweat. Cold start's ~23 s while the weights load, then she's good as gold — no per-request load tax after that.
+
+Every clip got run back through ASR on `:5093` to make sure it's actual speech and not a fistful of static — transcribed clean, peaks sitting 0.53–0.93. And don't bother with the 4-bit conversions, eh — both of them decode to noise (ASR comes back empty), so **8-bit's the one**. Sweet as.
+
+> Honest single-box measurements, not a leaderboard flex. Your mileage'll shift with the chip and how warm the caches are.
+
 ## Highlights
 
 <img src="./docs/assets/totalability.png" width=200%>
